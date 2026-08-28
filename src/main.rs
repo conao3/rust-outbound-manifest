@@ -569,26 +569,32 @@ mod tests {
         atomic_write_json(&path, &loaded.manifest).unwrap();
         verify(&load(&path).unwrap()).unwrap();
         fs::write(directory.path().join("body.md"), "changed\n").unwrap();
-        assert!(verify(&load(&path).unwrap())
-            .unwrap_err()
-            .contains("approved content changed"));
+        assert!(
+            verify(&load(&path).unwrap())
+                .unwrap_err()
+                .contains("approved content changed")
+        );
     }
 
     #[test]
     fn unresolved_placeholder_is_rejected() {
         let (directory, path) = fixture();
         fs::write(directory.path().join("body.md"), "Hello TODO\n").unwrap();
-        assert!(check(&load(&path).unwrap())
-            .unwrap_err()
-            .contains("unresolved placeholder"));
+        assert!(
+            check(&load(&path).unwrap())
+                .unwrap_err()
+                .contains("unresolved placeholder")
+        );
     }
 
     #[test]
     fn changed_attachment_is_rejected_before_sealing() {
         let (directory, path) = fixture();
         fs::write(directory.path().join("contract.pdf"), b"different").unwrap();
-        assert!(check(&load(&path).unwrap())
-            .unwrap_err()
-            .contains("attachment sha256 mismatch"));
+        assert!(
+            check(&load(&path).unwrap())
+                .unwrap_err()
+                .contains("attachment sha256 mismatch")
+        );
     }
 }
