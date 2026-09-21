@@ -174,7 +174,7 @@ struct CanonicalAttachment<'a> {
 }
 
 struct BodyDocument<'a> {
-    frontmatter: Option<&'a str>,
+    preamble: Option<&'a str>,
     body: &'a str,
 }
 
@@ -275,30 +275,24 @@ fn sha256(path: &Path) -> Result<String> {
     Ok(hex::encode(Sha256::digest(bytes)))
 }
 
-fn split_body(raw: &str) -> Result<BodyDocument<'_>> {
-    let Some(rest) = raw
-        .strip_prefix("---\n")
-        .or_else(|| raw.strip_prefix("---\r\n"))
-    else {
-        return Ok(BodyDocument {
-            frontmatter: None,
-            body: raw,
-        });
-    };
+fn split_body(raw: &str) -> BodyDocument<'_> {
     let mut offset = 0;
-    while offset <= rest.len() {
-        let line_end = rest[offset..]
+    while offset <= raw.len() {
+        let line_end = raw[offset..]
             .find('\n')
-            .map_or(rest.len(), |index| offset + index);
-        if rest[offset..line_end].trim_end_matches('\r') == "---" {
-            return Ok(BodyDocument {
-                frontmatter: Some(&rest[..offset]),
-                body: rest[line_end..].trim_start_matches(['\n', '\r']),
-            });
+            .map_or(raw.len(), |index| offset + index);
+        if raw[offset..line_end].trim_end_matches('\r') == "---" {
+            return BodyDocument {
+                preamble: Some(&raw[..offset]),
+                body: raw[line_end..].trim_start_matches(['\n', '\r']),
+            };
         }
         offset = line_end + 1;
     }
-    Err("frontmatter block is not closed by a `---` line".to_string())
+    BodyDocument {
+        preamble: None,
+        body: raw,
+    }
 }
 
 fn basic_email_valid(address: &str) -> bool {
@@ -345,11 +339,11 @@ fn check(loaded: &LoadedManifest) -> Result<CheckReport> {
     let body_path = resolve(&loaded.base, &manifest.body_file);
     let raw = fs::read_to_string(&body_path)
         .map_err(|error| format!("{}: {error}", body_path.display()))?;
-    let document = split_body(&raw)?;
+    let document = split_body(&raw);
     let body = document.body;
     if body.trim().is_empty() {
-        return Err(match document.frontmatter {
-            Some(_) => "body file has no content below the frontmatter".to_string(),
+        return Err(match document.preamble {
+            Some(_) => "body file has no content below the `---` separator".to_string(),
             None => "body file is empty".to_string(),
         });
     }
@@ -441,7 +435,7 @@ fn review(path: &Path) -> Result<()> {
     let manifest = &loaded.manifest;
     let body_path = resolve(&loaded.base, &manifest.body_file);
     let raw = fs::read_to_string(&body_path).map_err(|error| error.to_string())?;
-    let body = split_body(&raw)?.body;
+    let body = split_body(&raw).body;
     println!("# External action review");
     println!();
     println!("- Manifest: {}", path.display());
@@ -621,14 +615,12 @@ mod tests {
     }
 
     #[test]
-    fn frontmatter_stays_out_of_the_body() {
+    fn preamble_stays_out_of_the_body() {
         let (directory, path) = fixture();
         let body = directory.path().join("body.md");
-        fs::write(
-            &body,
-            "---\nchannel: email\nnote: TODO decide between draft A and B\n---\n\nHello,\n",
-        )
-        .unwrap();
+        let preamble =
+            "- 宛先: person@example.com\n- 判断材料: TODO 案 A と案 B のどちらにするか\n\n---\n\n";
+        fs::write(&body, format!("{preamble}Hello,\n")).unwrap();
         let report = check(&load(&path).unwrap()).unwrap();
         assert_eq!(report.body_bytes, "Hello,\n".len() as u64);
         assert_eq!(
@@ -644,38 +636,37 @@ mod tests {
             content_sha256: report.content_sha256,
         });
         atomic_write_json(&path, &loaded.manifest).unwrap();
-        fs::write(&body, "---\nnote: 案 A で確定\n---\n\nHello,\n").unwrap();
+        fs::write(
+            &body,
+            "- 宛先: person@example.com\n- 案 A で確定\n\n---\n\nHello,\n",
+        )
+        .unwrap();
         verify(&load(&path).unwrap()).unwrap();
-        fs::write(&body, "---\nnote: 案 A で確定\n---\n\nHello!\n").unwrap();
+        fs::write(
+            &body,
+            "- 宛先: person@example.com\n- 案 A で確定\n\n---\n\nHello!\n",
+        )
+        .unwrap();
         assert!(verify(&load(&path).unwrap())
             .unwrap_err()
             .contains("approved content changed"));
     }
 
     #[test]
-    fn unclosed_frontmatter_is_rejected() {
+    fn a_file_without_a_separator_is_all_body() {
         let (directory, path) = fixture();
-        fs::write(
-            directory.path().join("body.md"),
-            "---\nchannel: email\n\nHello,\n",
-        )
-        .unwrap();
-        assert!(check(&load(&path).unwrap())
-            .unwrap_err()
-            .contains("frontmatter block is not closed"));
+        fs::write(directory.path().join("body.md"), "Hello,\n").unwrap();
+        let report = check(&load(&path).unwrap()).unwrap();
+        assert_eq!(report.body_bytes, "Hello,\n".len() as u64);
     }
 
     #[test]
-    fn frontmatter_without_a_body_is_rejected() {
+    fn a_separator_without_a_body_is_rejected() {
         let (directory, path) = fixture();
-        fs::write(
-            directory.path().join("body.md"),
-            "---\nchannel: email\n---\n",
-        )
-        .unwrap();
+        fs::write(directory.path().join("body.md"), "- 宛先: person\n\n---\n").unwrap();
         assert!(check(&load(&path).unwrap())
             .unwrap_err()
-            .contains("no content below the frontmatter"));
+            .contains("no content below the `---` separator"));
     }
 
     #[test]
