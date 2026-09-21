@@ -173,6 +173,11 @@ struct CanonicalAttachment<'a> {
     sha256: &'a str,
 }
 
+struct BodyDocument<'a> {
+    frontmatter: Option<&'a str>,
+    body: &'a str,
+}
+
 struct LoadedManifest {
     path: PathBuf,
     base: PathBuf,
@@ -270,6 +275,32 @@ fn sha256(path: &Path) -> Result<String> {
     Ok(hex::encode(Sha256::digest(bytes)))
 }
 
+fn split_body(raw: &str) -> Result<BodyDocument<'_>> {
+    let Some(rest) = raw
+        .strip_prefix("---\n")
+        .or_else(|| raw.strip_prefix("---\r\n"))
+    else {
+        return Ok(BodyDocument {
+            frontmatter: None,
+            body: raw,
+        });
+    };
+    let mut offset = 0;
+    while offset <= rest.len() {
+        let line_end = rest[offset..]
+            .find('\n')
+            .map_or(rest.len(), |index| offset + index);
+        if rest[offset..line_end].trim_end_matches('\r') == "---" {
+            return Ok(BodyDocument {
+                frontmatter: Some(&rest[..offset]),
+                body: rest[line_end..].trim_start_matches(['\n', '\r']),
+            });
+        }
+        offset = line_end + 1;
+    }
+    Err("frontmatter block is not closed by a `---` line".to_string())
+}
+
 fn basic_email_valid(address: &str) -> bool {
     let mut parts = address.split('@');
     matches!((parts.next(), parts.next(), parts.next()), (Some(local), Some(domain), None) if !local.is_empty() && domain.contains('.') && !address.chars().any(char::is_whitespace))
@@ -312,12 +343,17 @@ fn check(loaded: &LoadedManifest) -> Result<CheckReport> {
         }
     }
     let body_path = resolve(&loaded.base, &manifest.body_file);
-    let body = fs::read_to_string(&body_path)
+    let raw = fs::read_to_string(&body_path)
         .map_err(|error| format!("{}: {error}", body_path.display()))?;
+    let document = split_body(&raw)?;
+    let body = document.body;
     if body.trim().is_empty() {
-        return Err("body file is empty".to_string());
+        return Err(match document.frontmatter {
+            Some(_) => "body file has no content below the frontmatter".to_string(),
+            None => "body file is empty".to_string(),
+        });
     }
-    let mut hits = placeholder_hits(&body, &manifest.allow_placeholders);
+    let mut hits = placeholder_hits(body, &manifest.allow_placeholders);
     if let Some(subject) = &manifest.subject {
         hits.extend(placeholder_hits(subject, &manifest.allow_placeholders));
     }
@@ -327,8 +363,8 @@ fn check(loaded: &LoadedManifest) -> Result<CheckReport> {
         return Err(format!("unresolved placeholder(s): {}", hits.join(", ")));
     }
 
-    let body_metadata = fs::metadata(&body_path).map_err(|error| error.to_string())?;
-    let body_sha256 = sha256(&body_path)?;
+    let body_bytes = body.len() as u64;
+    let body_sha256 = hex::encode(Sha256::digest(body.as_bytes()));
     let mut seen = HashSet::new();
     let mut attachment_reports = Vec::new();
     for attachment in &manifest.attachments {
@@ -391,7 +427,7 @@ fn check(loaded: &LoadedManifest) -> Result<CheckReport> {
         channel: manifest.channel.as_str().to_string(),
         context: manifest.context.clone(),
         recipients: manifest.to.len() + manifest.cc.len() + manifest.bcc.len(),
-        body_bytes: body_metadata.len(),
+        body_bytes,
         body_sha256,
         attachments: attachment_reports,
         content_sha256,
@@ -404,7 +440,8 @@ fn review(path: &Path) -> Result<()> {
     let report = check(&loaded)?;
     let manifest = &loaded.manifest;
     let body_path = resolve(&loaded.base, &manifest.body_file);
-    let body = fs::read_to_string(&body_path).map_err(|error| error.to_string())?;
+    let raw = fs::read_to_string(&body_path).map_err(|error| error.to_string())?;
+    let body = split_body(&raw)?.body;
     println!("# External action review");
     println!();
     println!("- Manifest: {}", path.display());
@@ -569,32 +606,84 @@ mod tests {
         atomic_write_json(&path, &loaded.manifest).unwrap();
         verify(&load(&path).unwrap()).unwrap();
         fs::write(directory.path().join("body.md"), "changed\n").unwrap();
-        assert!(
-            verify(&load(&path).unwrap())
-                .unwrap_err()
-                .contains("approved content changed")
-        );
+        assert!(verify(&load(&path).unwrap())
+            .unwrap_err()
+            .contains("approved content changed"));
     }
 
     #[test]
     fn unresolved_placeholder_is_rejected() {
         let (directory, path) = fixture();
         fs::write(directory.path().join("body.md"), "Hello TODO\n").unwrap();
-        assert!(
-            check(&load(&path).unwrap())
-                .unwrap_err()
-                .contains("unresolved placeholder")
+        assert!(check(&load(&path).unwrap())
+            .unwrap_err()
+            .contains("unresolved placeholder"));
+    }
+
+    #[test]
+    fn frontmatter_stays_out_of_the_body() {
+        let (directory, path) = fixture();
+        let body = directory.path().join("body.md");
+        fs::write(
+            &body,
+            "---\nchannel: email\nnote: TODO decide between draft A and B\n---\n\nHello,\n",
+        )
+        .unwrap();
+        let report = check(&load(&path).unwrap()).unwrap();
+        assert_eq!(report.body_bytes, "Hello,\n".len() as u64);
+        assert_eq!(
+            report.body_sha256,
+            hex::encode(Sha256::digest("Hello,\n".as_bytes()))
         );
+
+        let mut loaded = load(&path).unwrap();
+        loaded.manifest.approval = Some(Approval {
+            by: "user".to_string(),
+            approved_at: Utc::now(),
+            note: "approved in chat".to_string(),
+            content_sha256: report.content_sha256,
+        });
+        atomic_write_json(&path, &loaded.manifest).unwrap();
+        fs::write(&body, "---\nnote: 案 A で確定\n---\n\nHello,\n").unwrap();
+        verify(&load(&path).unwrap()).unwrap();
+        fs::write(&body, "---\nnote: 案 A で確定\n---\n\nHello!\n").unwrap();
+        assert!(verify(&load(&path).unwrap())
+            .unwrap_err()
+            .contains("approved content changed"));
+    }
+
+    #[test]
+    fn unclosed_frontmatter_is_rejected() {
+        let (directory, path) = fixture();
+        fs::write(
+            directory.path().join("body.md"),
+            "---\nchannel: email\n\nHello,\n",
+        )
+        .unwrap();
+        assert!(check(&load(&path).unwrap())
+            .unwrap_err()
+            .contains("frontmatter block is not closed"));
+    }
+
+    #[test]
+    fn frontmatter_without_a_body_is_rejected() {
+        let (directory, path) = fixture();
+        fs::write(
+            directory.path().join("body.md"),
+            "---\nchannel: email\n---\n",
+        )
+        .unwrap();
+        assert!(check(&load(&path).unwrap())
+            .unwrap_err()
+            .contains("no content below the frontmatter"));
     }
 
     #[test]
     fn changed_attachment_is_rejected_before_sealing() {
         let (directory, path) = fixture();
         fs::write(directory.path().join("contract.pdf"), b"different").unwrap();
-        assert!(
-            check(&load(&path).unwrap())
-                .unwrap_err()
-                .contains("attachment sha256 mismatch")
-        );
+        assert!(check(&load(&path).unwrap())
+            .unwrap_err()
+            .contains("attachment sha256 mismatch"));
     }
 }

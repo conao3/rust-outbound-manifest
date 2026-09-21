@@ -28,6 +28,8 @@ outbound-manifest seal \
 outbound-manifest verify --manifest .claude-dev/task/outbound.json
 ```
 
+本文ファイルは先頭に `---` で囲んだ frontmatter を置ける。frontmatter には送信の文脈・出典・判断材料を書き、`---` の下に送信する文字列だけを置く。`check` / `review` / `seal` / `verify` は frontmatter を除いた本文だけを対象にするため、承認後に frontmatter を書き足しても `verify` は通り、本文が変われば失敗する。frontmatter を開いて `---` の行で閉じないファイルは `check` が拒否する。
+
 `check` は空本文、不正なメールアドレス、重複/空/欠落添付、添付 hash の変化、`TODO` / `TBD` / `FIXME` / `{{...}}` / `<insert...>` / `[要確認]` を拒否する。`seal` は本文ファイルと添付の hash を含む content hash を記録する。承認後に宛先・件名・本文・添付・context のいずれかが変わると `verify` が失敗するため、変更後は再度 review とユーザー承認が必要になる。
 
 `seal` はユーザー承認を取得する機能ではない。エージェントはユーザーの明示承認なしに実行してはならない。
