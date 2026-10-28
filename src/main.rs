@@ -600,18 +600,22 @@ mod tests {
         atomic_write_json(&path, &loaded.manifest).unwrap();
         verify(&load(&path).unwrap()).unwrap();
         fs::write(directory.path().join("body.md"), "changed\n").unwrap();
-        assert!(verify(&load(&path).unwrap())
-            .unwrap_err()
-            .contains("approved content changed"));
+        assert!(
+            verify(&load(&path).unwrap())
+                .unwrap_err()
+                .contains("approved content changed")
+        );
     }
 
     #[test]
     fn unresolved_placeholder_is_rejected() {
         let (directory, path) = fixture();
         fs::write(directory.path().join("body.md"), "Hello TODO\n").unwrap();
-        assert!(check(&load(&path).unwrap())
-            .unwrap_err()
-            .contains("unresolved placeholder"));
+        assert!(
+            check(&load(&path).unwrap())
+                .unwrap_err()
+                .contains("unresolved placeholder")
+        );
     }
 
     #[test]
@@ -647,9 +651,11 @@ mod tests {
             "- 宛先: person@example.com\n- 案 A で確定\n\n---\n\nHello!\n",
         )
         .unwrap();
-        assert!(verify(&load(&path).unwrap())
-            .unwrap_err()
-            .contains("approved content changed"));
+        assert!(
+            verify(&load(&path).unwrap())
+                .unwrap_err()
+                .contains("approved content changed")
+        );
     }
 
     #[test]
@@ -664,17 +670,21 @@ mod tests {
     fn a_separator_without_a_body_is_rejected() {
         let (directory, path) = fixture();
         fs::write(directory.path().join("body.md"), "- 宛先: person\n\n---\n").unwrap();
-        assert!(check(&load(&path).unwrap())
-            .unwrap_err()
-            .contains("no content below the `---` separator"));
+        assert!(
+            check(&load(&path).unwrap())
+                .unwrap_err()
+                .contains("no content below the `---` separator")
+        );
     }
 
     #[test]
     fn changed_attachment_is_rejected_before_sealing() {
         let (directory, path) = fixture();
         fs::write(directory.path().join("contract.pdf"), b"different").unwrap();
-        assert!(check(&load(&path).unwrap())
-            .unwrap_err()
-            .contains("attachment sha256 mismatch"));
+        assert!(
+            check(&load(&path).unwrap())
+                .unwrap_err()
+                .contains("attachment sha256 mismatch")
+        );
     }
 }
