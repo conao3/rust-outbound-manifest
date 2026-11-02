@@ -1,16 +1,18 @@
-use std::{
-    collections::HashSet,
-    fs,
-    io::Write,
-    path::{Path, PathBuf},
-};
+mod error;
+mod grammar;
+mod manifest;
+mod output;
 
-use chrono::{DateTime, Utc};
-use clap::{Args, Parser, Subcommand, ValueEnum};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use std::path::PathBuf;
 
-type Result<T> = std::result::Result<T, String>;
+use clap::{Args, CommandFactory, Parser, Subcommand};
+use serde::Serialize;
+use serde_json::Value;
+
+use error::{other, parameter, Result};
+use grammar::{CliInputArgs, SkeletonKind};
+use manifest::{Channel, CheckReport, NewManifest, ReviewReport, SealReport};
+use output::{OutputFormat, Response};
 
 #[derive(Parser)]
 #[command(
@@ -19,672 +21,238 @@ type Result<T> = std::result::Result<T, String>;
     about = "Review, seal, and verify external communications"
 )]
 struct Cli {
+    /// Output format
+    #[arg(long, global = true, help_heading = "Global Options", value_enum, default_value_t = OutputFormat::Json)]
+    output: OutputFormat,
+    /// JMESPath expression applied to the output
+    #[arg(
+        long,
+        global = true,
+        help_heading = "Global Options",
+        value_name = "JMESPATH"
+    )]
+    query: Option<String>,
+    /// Print debug logs to stderr
+    #[arg(long, global = true, help_heading = "Global Options")]
+    debug: bool,
     #[command(subcommand)]
-    command: Commands,
+    command: Command,
 }
 
 #[derive(Subcommand)]
-enum Commands {
-    Create(CreateArgs),
-    Check(ManifestArgs),
-    Review(ManifestArgs),
-    Seal(SealArgs),
-    Verify(ManifestArgs),
+enum Command {
+    /// Create, check, review, seal, and verify outbound manifests
+    #[command(subcommand)]
+    Manifest(ManifestCommand),
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, ValueEnum)]
-#[serde(rename_all = "snake_case")]
-#[clap(rename_all = "snake_case")]
-enum Channel {
-    Email,
-    Slack,
-    Discord,
-    Social,
-    Form,
-}
-
-impl Channel {
-    fn as_str(&self) -> &'static str {
-        match self {
-            Self::Email => "email",
-            Self::Slack => "slack",
-            Self::Discord => "discord",
-            Self::Social => "social",
-            Self::Form => "form",
-        }
-    }
+#[derive(Subcommand)]
+enum ManifestCommand {
+    /// Write a new manifest that fixes the channel, context, recipients, subject, body file, and attachments
+    #[command(name = "create-manifest")]
+    Create(CreateManifestArgs),
+    /// Check placeholders, recipients, and the body and attachment hashes
+    #[command(name = "check-manifest")]
+    Check(ManifestFileArgs),
+    /// Show the recipients, body, attachments, and content hash for approval (use --output text to read it)
+    #[command(name = "review-manifest")]
+    Review(ManifestFileArgs),
+    /// Record the user's explicit approval of the reviewed content hash. Run only after the user approved this exact content
+    #[command(name = "seal-manifest")]
+    Seal(SealManifestArgs),
+    /// Fail unless the current content matches the sealed approval. Run right before sending
+    #[command(name = "verify-manifest")]
+    Verify(ManifestFileArgs),
 }
 
 #[derive(Args)]
-struct CreateArgs {
+struct CreateManifestArgs {
+    /// Path of the manifest JSON to create
     #[arg(long)]
-    manifest: PathBuf,
+    manifest_file: PathBuf,
+    /// Channel of the outbound message
     #[arg(long, value_enum)]
     channel: Channel,
+    /// The exact thread, channel, account, or form the message goes to
     #[arg(long)]
     context: String,
-    #[arg(long)]
+    /// Recipients (space-separated)
+    #[arg(long, num_args = 1..)]
     to: Vec<String>,
-    #[arg(long)]
+    /// Cc recipients (space-separated)
+    #[arg(long, num_args = 1..)]
     cc: Vec<String>,
-    #[arg(long)]
+    /// Bcc recipients (space-separated)
+    #[arg(long, num_args = 1..)]
     bcc: Vec<String>,
+    /// Subject (required for email)
     #[arg(long)]
     subject: Option<String>,
+    /// Path of the body file, relative to the manifest directory. Only the text below the first `---` line is the body
     #[arg(long)]
     body_file: PathBuf,
-    #[arg(long)]
-    attachment: Vec<PathBuf>,
+    /// Attachment paths relative to the manifest directory (space-separated)
+    #[arg(long, num_args = 1..)]
+    attachments: Vec<PathBuf>,
+    #[command(flatten)]
+    input: CliInputArgs,
 }
 
 #[derive(Args)]
-struct ManifestArgs {
+struct ManifestFileArgs {
+    /// Path of the manifest JSON
     #[arg(long)]
-    manifest: PathBuf,
-    #[arg(long)]
-    json: bool,
+    manifest_file: PathBuf,
+    #[command(flatten)]
+    input: CliInputArgs,
 }
 
 #[derive(Args)]
-struct SealArgs {
+struct SealManifestArgs {
+    /// Path of the manifest JSON
     #[arg(long)]
-    manifest: PathBuf,
+    manifest_file: PathBuf,
+    /// Who approved the content
     #[arg(long, default_value = "user")]
-    by: String,
+    approved_by: String,
+    /// Where and how the approval was given
     #[arg(long)]
     approval_note: String,
+    /// Approval time in RFC 3339 (defaults to now)
     #[arg(long)]
     approved_at: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct Manifest {
-    schema: u32,
-    channel: Channel,
-    context: String,
-    #[serde(default)]
-    to: Vec<String>,
-    #[serde(default)]
-    cc: Vec<String>,
-    #[serde(default)]
-    bcc: Vec<String>,
-    #[serde(default)]
-    subject: Option<String>,
-    body_file: PathBuf,
-    #[serde(default)]
-    attachments: Vec<Attachment>,
-    #[serde(default)]
-    allow_placeholders: Vec<String>,
-    #[serde(default)]
-    approval: Option<Approval>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct Attachment {
-    path: PathBuf,
-    sha256: String,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct Approval {
-    by: String,
-    approved_at: DateTime<Utc>,
-    note: String,
-    content_sha256: String,
-}
-
-#[derive(Debug, Serialize)]
-struct CheckReport {
-    manifest: PathBuf,
-    channel: String,
-    context: String,
-    recipients: usize,
-    body_bytes: u64,
-    body_sha256: String,
-    attachments: Vec<AttachmentReport>,
-    content_sha256: String,
-    sealed: bool,
-}
-
-#[derive(Debug, Serialize)]
-struct AttachmentReport {
-    path: PathBuf,
-    bytes: u64,
-    sha256: String,
-}
-
-#[derive(Serialize)]
-struct CanonicalContent<'a> {
-    schema: u32,
-    channel: &'a str,
-    context: &'a str,
-    to: &'a [String],
-    cc: &'a [String],
-    bcc: &'a [String],
-    subject: &'a Option<String>,
-    body_file: &'a Path,
-    body_sha256: &'a str,
-    attachments: Vec<CanonicalAttachment<'a>>,
-}
-
-#[derive(Serialize)]
-struct CanonicalAttachment<'a> {
-    path: &'a Path,
-    sha256: &'a str,
-}
-
-struct BodyDocument<'a> {
-    preamble: Option<&'a str>,
-    body: &'a str,
-}
-
-struct LoadedManifest {
-    path: PathBuf,
-    base: PathBuf,
-    manifest: Manifest,
+    #[command(flatten)]
+    input: CliInputArgs,
 }
 
 fn main() {
-    if let Err(error) = run() {
-        eprintln!("error: {error}");
-        std::process::exit(1);
+    let code = match run() {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("error: {error}");
+            error.exit_code()
+        }
+    };
+    std::process::exit(code);
+}
+
+fn to_value<T: Serialize>(value: &T) -> Result<Value> {
+    serde_json::to_value(value).map_err(|error| other(error.to_string()))
+}
+
+fn response<T: Serialize>(report: &T, text: Option<String>) -> Result<Response> {
+    Ok(Response {
+        value: to_value(report)?,
+        text,
+    })
+}
+
+fn output_skeleton(path: &[String]) -> Result<Value> {
+    match path.last().map(String::as_str) {
+        Some("create-manifest" | "check-manifest" | "verify-manifest") => {
+            to_value(&CheckReport::skeleton())
+        }
+        Some("review-manifest") => to_value(&ReviewReport::skeleton()),
+        Some("seal-manifest") => to_value(&SealReport::default()),
+        _ => Err(parameter(
+            "--generate-cli-skeleton needs a command and a subcommand",
+        )),
     }
 }
 
 fn run() -> Result<()> {
-    match Cli::parse().command {
-        Commands::Create(args) => create(args)?,
-        Commands::Check(args) => {
-            let loaded = load(&args.manifest)?;
-            let report = check(&loaded)?;
-            print_report(&report, args.json)?;
+    let mut root = Cli::command();
+    root.build();
+    let prepared = grammar::prepare(&root, std::env::args_os().collect())?;
+    let debug = prepared.argv.iter().any(|token| token == "--debug");
+    if debug {
+        eprintln!("debug: argv {:?}", &prepared.argv[1..]);
+    }
+
+    if let Some(kind) = prepared.skeleton {
+        let mut command = &root;
+        for name in &prepared.path {
+            command = command
+                .find_subcommand(name)
+                .ok_or_else(|| other(format!("unknown subcommand {name}")))?;
         }
-        Commands::Review(args) => review(&args.manifest)?,
-        Commands::Seal(args) => seal(args)?,
-        Commands::Verify(args) => {
-            let loaded = load(&args.manifest)?;
-            let report = verify(&loaded)?;
-            print_report(&report, args.json)?;
-        }
-    }
-    Ok(())
-}
-
-fn create(args: CreateArgs) -> Result<()> {
-    if args.manifest.exists() {
-        return Err(format!("{} already exists", args.manifest.display()));
-    }
-    if let Some(parent) = args.manifest.parent() {
-        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    let base = args.manifest.parent().unwrap_or_else(|| Path::new("."));
-    let mut attachments = Vec::new();
-    for path in args.attachment {
-        attachments.push(Attachment {
-            sha256: sha256(&resolve(base, &path))?,
-            path,
-        });
-    }
-    let manifest = Manifest {
-        schema: 1,
-        channel: args.channel,
-        context: args.context,
-        to: args.to,
-        cc: args.cc,
-        bcc: args.bcc,
-        subject: args.subject,
-        body_file: args.body_file,
-        attachments,
-        allow_placeholders: Vec::new(),
-        approval: None,
-    };
-    atomic_write_json(&args.manifest, &manifest)?;
-    let report = check(&load(&args.manifest)?)?;
-    println!(
-        "created {}; review content sha256:{}",
-        args.manifest.display(),
-        report.content_sha256
-    );
-    Ok(())
-}
-
-fn load(path: &Path) -> Result<LoadedManifest> {
-    let raw = fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
-    let manifest =
-        serde_json::from_str(&raw).map_err(|error| format!("{}: {error}", path.display()))?;
-    Ok(LoadedManifest {
-        path: path.to_path_buf(),
-        base: path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .to_path_buf(),
-        manifest,
-    })
-}
-
-fn resolve(base: &Path, path: &Path) -> PathBuf {
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        base.join(path)
-    }
-}
-
-fn sha256(path: &Path) -> Result<String> {
-    let bytes = fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
-    Ok(hex::encode(Sha256::digest(bytes)))
-}
-
-fn split_body(raw: &str) -> BodyDocument<'_> {
-    let mut offset = 0;
-    while offset <= raw.len() {
-        let line_end = raw[offset..]
-            .find('\n')
-            .map_or(raw.len(), |index| offset + index);
-        if raw[offset..line_end].trim_end_matches('\r') == "---" {
-            return BodyDocument {
-                preamble: Some(&raw[..offset]),
-                body: raw[line_end..].trim_start_matches(['\n', '\r']),
-            };
-        }
-        offset = line_end + 1;
-    }
-    BodyDocument {
-        preamble: None,
-        body: raw,
-    }
-}
-
-fn basic_email_valid(address: &str) -> bool {
-    let mut parts = address.split('@');
-    matches!((parts.next(), parts.next(), parts.next()), (Some(local), Some(domain), None) if !local.is_empty() && domain.contains('.') && !address.chars().any(char::is_whitespace))
-}
-
-fn placeholder_hits<'a>(value: &'a str, allow: &[String]) -> Vec<&'a str> {
-    const PATTERNS: [&str; 7] = ["TODO", "TBD", "FIXME", "{{", "}}", "<insert", "[要確認]"];
-    PATTERNS
-        .into_iter()
-        .filter(|pattern| {
-            value.contains(pattern) && !allow.iter().any(|allowed| allowed == pattern)
-        })
-        .collect()
-}
-
-fn check(loaded: &LoadedManifest) -> Result<CheckReport> {
-    let manifest = &loaded.manifest;
-    if manifest.schema != 1 {
-        return Err(format!(
-            "unsupported manifest schema {}; expected 1",
-            manifest.schema
-        ));
-    }
-    if manifest.context.trim().is_empty() {
-        return Err(
-            "context must identify the exact thread, channel, account, or form".to_string(),
-        );
-    }
-    if matches!(manifest.channel, Channel::Email) {
-        if manifest.to.is_empty() {
-            return Err("email manifest requires at least one recipient in `to`".to_string());
-        }
-        if manifest.subject.as_deref().unwrap_or("").trim().is_empty() {
-            return Err("email manifest requires a non-empty subject".to_string());
-        }
-        for address in manifest.to.iter().chain(&manifest.cc).chain(&manifest.bcc) {
-            if !basic_email_valid(address) {
-                return Err(format!("invalid email address: {address}"));
-            }
-        }
-    }
-    let body_path = resolve(&loaded.base, &manifest.body_file);
-    let raw = fs::read_to_string(&body_path)
-        .map_err(|error| format!("{}: {error}", body_path.display()))?;
-    let document = split_body(&raw);
-    let body = document.body;
-    if body.trim().is_empty() {
-        return Err(match document.preamble {
-            Some(_) => "body file has no content below the `---` separator".to_string(),
-            None => "body file is empty".to_string(),
-        });
-    }
-    let mut hits = placeholder_hits(body, &manifest.allow_placeholders);
-    if let Some(subject) = &manifest.subject {
-        hits.extend(placeholder_hits(subject, &manifest.allow_placeholders));
-    }
-    if !hits.is_empty() {
-        hits.sort_unstable();
-        hits.dedup();
-        return Err(format!("unresolved placeholder(s): {}", hits.join(", ")));
-    }
-
-    let body_bytes = body.len() as u64;
-    let body_sha256 = hex::encode(Sha256::digest(body.as_bytes()));
-    let mut seen = HashSet::new();
-    let mut attachment_reports = Vec::new();
-    for attachment in &manifest.attachments {
-        let path = resolve(&loaded.base, &attachment.path);
-        let canonical = path
-            .canonicalize()
-            .map_err(|error| format!("{}: {error}", path.display()))?;
-        if !seen.insert(canonical) {
-            return Err(format!(
-                "duplicate attachment: {}",
-                attachment.path.display()
+        if command.has_subcommands() {
+            return Err(parameter(
+                "--generate-cli-skeleton needs a command and a subcommand",
             ));
         }
-        let metadata =
-            fs::metadata(&path).map_err(|error| format!("{}: {error}", path.display()))?;
-        if !metadata.is_file() || metadata.len() == 0 {
-            return Err(format!(
-                "attachment is not a non-empty file: {}",
-                path.display()
-            ));
-        }
-        let actual = sha256(&path)?;
-        if actual != attachment.sha256 {
-            return Err(format!(
-                "attachment sha256 mismatch for {}: manifest {}, actual {actual}",
-                attachment.path.display(),
-                attachment.sha256
-            ));
-        }
-        attachment_reports.push(AttachmentReport {
-            path: attachment.path.clone(),
-            bytes: metadata.len(),
-            sha256: actual,
-        });
-    }
-
-    let canonical = CanonicalContent {
-        schema: manifest.schema,
-        channel: manifest.channel.as_str(),
-        context: &manifest.context,
-        to: &manifest.to,
-        cc: &manifest.cc,
-        bcc: &manifest.bcc,
-        subject: &manifest.subject,
-        body_file: &manifest.body_file,
-        body_sha256: &body_sha256,
-        attachments: manifest
-            .attachments
-            .iter()
-            .map(|attachment| CanonicalAttachment {
-                path: &attachment.path,
-                sha256: &attachment.sha256,
-            })
-            .collect(),
-    };
-    let encoded = serde_json::to_vec(&canonical).map_err(|error| error.to_string())?;
-    let content_sha256 = hex::encode(Sha256::digest(encoded));
-    Ok(CheckReport {
-        manifest: loaded.path.clone(),
-        channel: manifest.channel.as_str().to_string(),
-        context: manifest.context.clone(),
-        recipients: manifest.to.len() + manifest.cc.len() + manifest.bcc.len(),
-        body_bytes,
-        body_sha256,
-        attachments: attachment_reports,
-        content_sha256,
-        sealed: manifest.approval.is_some(),
-    })
-}
-
-fn review(path: &Path) -> Result<()> {
-    let loaded = load(path)?;
-    let report = check(&loaded)?;
-    let manifest = &loaded.manifest;
-    let body_path = resolve(&loaded.base, &manifest.body_file);
-    let raw = fs::read_to_string(&body_path).map_err(|error| error.to_string())?;
-    let body = split_body(&raw).body;
-    println!("# External action review");
-    println!();
-    println!("- Manifest: {}", path.display());
-    println!("- Channel: {}", manifest.channel.as_str());
-    println!("- Context: {}", manifest.context);
-    println!("- To: {}", manifest.to.join(", "));
-    println!("- Cc: {}", manifest.cc.join(", "));
-    println!("- Bcc: {}", manifest.bcc.join(", "));
-    println!("- Subject: {}", manifest.subject.as_deref().unwrap_or(""));
-    println!("- Content SHA-256: {}", report.content_sha256);
-    println!();
-    println!("## Body ({})", manifest.body_file.display());
-    println!();
-    print!("{body}");
-    if !body.ends_with('\n') {
-        println!();
-    }
-    println!();
-    println!("## Attachments");
-    println!();
-    if report.attachments.is_empty() {
-        println!("- (none)");
-    } else {
-        for attachment in report.attachments {
-            println!(
-                "- {} — {} bytes — sha256:{}",
-                attachment.path.display(),
-                attachment.bytes,
-                attachment.sha256
-            );
-        }
-    }
-    Ok(())
-}
-
-fn seal(args: SealArgs) -> Result<()> {
-    if args.by.trim().is_empty() || args.approval_note.trim().is_empty() {
-        return Err("--by and --approval-note must be non-empty".to_string());
-    }
-    let mut loaded = load(&args.manifest)?;
-    let report = check(&loaded)?;
-    let approved_at = match args.approved_at {
-        Some(value) => DateTime::parse_from_rfc3339(&value)
-            .map_err(|_| "--approved-at must be RFC 3339".to_string())?
-            .with_timezone(&Utc),
-        None => Utc::now(),
-    };
-    loaded.manifest.approval = Some(Approval {
-        by: args.by,
-        approved_at,
-        note: args.approval_note,
-        content_sha256: report.content_sha256.clone(),
-    });
-    atomic_write_json(&args.manifest, &loaded.manifest)?;
-    println!(
-        "sealed {} at content sha256:{}",
-        args.manifest.display(),
-        report.content_sha256
-    );
-    Ok(())
-}
-
-fn verify(loaded: &LoadedManifest) -> Result<CheckReport> {
-    let report = check(loaded)?;
-    let approval = loaded
-        .manifest
-        .approval
-        .as_ref()
-        .ok_or_else(|| "manifest is not sealed by an explicit user approval".to_string())?;
-    if approval.content_sha256 != report.content_sha256 {
-        return Err(format!(
-            "approved content changed: sealed {}, current {}",
-            approval.content_sha256, report.content_sha256
-        ));
-    }
-    Ok(report)
-}
-
-fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("{} has no parent", path.display()))?;
-    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    let mut encoded = serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?;
-    encoded.push(b'\n');
-    let mut temporary =
-        tempfile::NamedTempFile::new_in(parent).map_err(|error| error.to_string())?;
-    temporary
-        .write_all(&encoded)
-        .map_err(|error| error.to_string())?;
-    temporary
-        .as_file()
-        .sync_all()
-        .map_err(|error| error.to_string())?;
-    temporary
-        .persist(path)
-        .map_err(|error| error.error.to_string())?;
-    Ok(())
-}
-
-fn print_report(report: &CheckReport, json: bool) -> Result<()> {
-    if json {
+        let value = match kind {
+            SkeletonKind::Input => grammar::input_skeleton(command),
+            SkeletonKind::Output => output_skeleton(&prepared.path)?,
+        };
         println!(
             "{}",
-            serde_json::to_string_pretty(report).map_err(|error| error.to_string())?
+            serde_json::to_string_pretty(&value).map_err(|error| other(error.to_string()))?
         );
-    } else {
-        println!(
-            "{}: {} recipient(s), {} attachment(s), sealed={}, content sha256:{}",
-            report.channel,
-            report.recipients,
-            report.attachments.len(),
-            report.sealed,
-            report.content_sha256
-        );
+        return Ok(());
     }
+
+    let cli = match Cli::try_parse_from(&prepared.argv) {
+        Ok(cli) => cli,
+        Err(error) => {
+            let code = if error.use_stderr() { 252 } else { 0 };
+            let _ = error.print();
+            std::process::exit(code);
+        }
+    };
+
+    if let Some(query) = &cli.query {
+        output::compile_query(query)?;
+    }
+    let Command::Manifest(command) = cli.command;
+    let (name, response) = match command {
+        ManifestCommand::Create(args) => {
+            let report = manifest::create(
+                &args.manifest_file,
+                NewManifest {
+                    channel: args.channel,
+                    context: args.context,
+                    to: args.to,
+                    cc: args.cc,
+                    bcc: args.bcc,
+                    subject: args.subject,
+                    body_file: args.body_file,
+                    attachments: args.attachments,
+                },
+            )?;
+            ("create-manifest", response(&report, None)?)
+        }
+        ManifestCommand::Check(args) => {
+            let report = manifest::check(&manifest::load(&args.manifest_file)?)?;
+            ("check-manifest", response(&report, None)?)
+        }
+        ManifestCommand::Review(args) => {
+            let report = manifest::review(&manifest::load(&args.manifest_file)?)?;
+            let text = report.to_markdown();
+            ("review-manifest", response(&report, Some(text))?)
+        }
+        ManifestCommand::Seal(args) => {
+            let report = manifest::seal(
+                &args.manifest_file,
+                args.approved_by,
+                args.approval_note,
+                args.approved_at,
+            )?;
+            ("seal-manifest", response(&report, None)?)
+        }
+        ManifestCommand::Verify(args) => {
+            let report = manifest::verify(&manifest::load(&args.manifest_file)?)?;
+            ("verify-manifest", response(&report, None)?)
+        }
+    };
+    print!(
+        "{}",
+        output::render(
+            &grammar::pascal_case(name),
+            response,
+            cli.output,
+            cli.query.as_deref()
+        )?
+    );
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn fixture() -> (tempfile::TempDir, PathBuf) {
-        let directory = tempfile::tempdir().unwrap();
-        let body = directory.path().join("body.md");
-        let attachment = directory.path().join("contract.pdf");
-        let manifest = directory.path().join("outbound.json");
-        fs::write(&body, "Hello,\n\nPlease see the attached file.\n").unwrap();
-        fs::write(&attachment, b"%PDF-1.4 fixture").unwrap();
-        let value = Manifest {
-            schema: 1,
-            channel: Channel::Email,
-            context: "Gmail sender@example.com thread: onboarding".to_string(),
-            to: vec!["person@example.com".to_string()],
-            cc: vec![],
-            bcc: vec![],
-            subject: Some("Onboarding documents".to_string()),
-            body_file: PathBuf::from("body.md"),
-            attachments: vec![Attachment {
-                path: PathBuf::from("contract.pdf"),
-                sha256: sha256(&attachment).unwrap(),
-            }],
-            allow_placeholders: vec![],
-            approval: None,
-        };
-        atomic_write_json(&manifest, &value).unwrap();
-        (directory, manifest)
-    }
-
-    #[test]
-    fn seal_and_verify_detect_body_changes() {
-        let (directory, path) = fixture();
-        let mut loaded = load(&path).unwrap();
-        let report = check(&loaded).unwrap();
-        loaded.manifest.approval = Some(Approval {
-            by: "user".to_string(),
-            approved_at: Utc::now(),
-            note: "approved in chat".to_string(),
-            content_sha256: report.content_sha256,
-        });
-        atomic_write_json(&path, &loaded.manifest).unwrap();
-        verify(&load(&path).unwrap()).unwrap();
-        fs::write(directory.path().join("body.md"), "changed\n").unwrap();
-        assert!(
-            verify(&load(&path).unwrap())
-                .unwrap_err()
-                .contains("approved content changed")
-        );
-    }
-
-    #[test]
-    fn unresolved_placeholder_is_rejected() {
-        let (directory, path) = fixture();
-        fs::write(directory.path().join("body.md"), "Hello TODO\n").unwrap();
-        assert!(
-            check(&load(&path).unwrap())
-                .unwrap_err()
-                .contains("unresolved placeholder")
-        );
-    }
-
-    #[test]
-    fn preamble_stays_out_of_the_body() {
-        let (directory, path) = fixture();
-        let body = directory.path().join("body.md");
-        let preamble =
-            "- 宛先: person@example.com\n- 判断材料: TODO 案 A と案 B のどちらにするか\n\n---\n\n";
-        fs::write(&body, format!("{preamble}Hello,\n")).unwrap();
-        let report = check(&load(&path).unwrap()).unwrap();
-        assert_eq!(report.body_bytes, "Hello,\n".len() as u64);
-        assert_eq!(
-            report.body_sha256,
-            hex::encode(Sha256::digest("Hello,\n".as_bytes()))
-        );
-
-        let mut loaded = load(&path).unwrap();
-        loaded.manifest.approval = Some(Approval {
-            by: "user".to_string(),
-            approved_at: Utc::now(),
-            note: "approved in chat".to_string(),
-            content_sha256: report.content_sha256,
-        });
-        atomic_write_json(&path, &loaded.manifest).unwrap();
-        fs::write(
-            &body,
-            "- 宛先: person@example.com\n- 案 A で確定\n\n---\n\nHello,\n",
-        )
-        .unwrap();
-        verify(&load(&path).unwrap()).unwrap();
-        fs::write(
-            &body,
-            "- 宛先: person@example.com\n- 案 A で確定\n\n---\n\nHello!\n",
-        )
-        .unwrap();
-        assert!(
-            verify(&load(&path).unwrap())
-                .unwrap_err()
-                .contains("approved content changed")
-        );
-    }
-
-    #[test]
-    fn a_file_without_a_separator_is_all_body() {
-        let (directory, path) = fixture();
-        fs::write(directory.path().join("body.md"), "Hello,\n").unwrap();
-        let report = check(&load(&path).unwrap()).unwrap();
-        assert_eq!(report.body_bytes, "Hello,\n".len() as u64);
-    }
-
-    #[test]
-    fn a_separator_without_a_body_is_rejected() {
-        let (directory, path) = fixture();
-        fs::write(directory.path().join("body.md"), "- 宛先: person\n\n---\n").unwrap();
-        assert!(
-            check(&load(&path).unwrap())
-                .unwrap_err()
-                .contains("no content below the `---` separator")
-        );
-    }
-
-    #[test]
-    fn changed_attachment_is_rejected_before_sealing() {
-        let (directory, path) = fixture();
-        fs::write(directory.path().join("contract.pdf"), b"different").unwrap();
-        assert!(
-            check(&load(&path).unwrap())
-                .unwrap_err()
-                .contains("attachment sha256 mismatch")
-        );
-    }
 }
