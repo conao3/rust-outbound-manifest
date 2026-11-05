@@ -71,7 +71,7 @@ struct Approval {
     content_sha256: String,
 }
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct CheckReport {
     pub manifest_file: PathBuf,
@@ -85,16 +85,7 @@ pub struct CheckReport {
     pub sealed: bool,
 }
 
-impl CheckReport {
-    pub fn skeleton() -> Self {
-        Self {
-            attachments: vec![AttachmentReport::default()],
-            ..Self::default()
-        }
-    }
-}
-
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct AttachmentReport {
     pub path: PathBuf,
@@ -102,7 +93,7 @@ pub struct AttachmentReport {
     pub sha256: String,
 }
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct ReviewReport {
     pub manifest_file: PathBuf,
@@ -120,17 +111,6 @@ pub struct ReviewReport {
 }
 
 impl ReviewReport {
-    pub fn skeleton() -> Self {
-        Self {
-            to: vec![String::new()],
-            cc: vec![String::new()],
-            bcc: vec![String::new()],
-            subject: Some(String::new()),
-            attachments: vec![AttachmentReport::default()],
-            ..Self::default()
-        }
-    }
-
     pub fn to_markdown(&self) -> String {
         let mut out = String::new();
         out.push_str("# External action review\n\n");
@@ -166,7 +146,7 @@ impl ReviewReport {
     }
 }
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct SealReport {
     pub manifest_file: PathBuf,

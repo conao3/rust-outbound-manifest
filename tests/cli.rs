@@ -184,12 +184,6 @@ fn syntax_errors_exit_252() {
             "--manifest-file",
             "file://missing",
         ],
-        vec![
-            "manifest",
-            "create-manifest",
-            "--cli-input-json",
-            "{\"Nope\": 1}",
-        ],
     ] {
         assert_eq!(
             run(directory.path(), &args).status.code(),
@@ -200,32 +194,25 @@ fn syntax_errors_exit_252() {
 }
 
 #[test]
-fn an_invalid_query_stops_before_the_manifest_is_written() {
-    let directory = fixture();
-    let output = run(directory.path(), &with(CREATE, &["--query", "[["]));
-    assert_eq!(output.status.code(), Some(252));
-    assert!(!directory.path().join("task/outbound.json").exists());
-}
-
-#[test]
-fn cli_input_json_and_file_values_fill_parameters() {
+fn file_values_fill_parameters() {
     let directory = fixture();
     let dir = directory.path();
     fs::write(dir.join("context.txt"), "Slack #general").unwrap();
-    fs::write(
-        dir.join("input.json"),
-        r#"{"ManifestFile": "task/outbound.json", "Channel": "slack", "Context": "overridden", "To": [], "BodyFile": "body.md", "Attachments": ["doc.pdf"]}"#,
-    )
-    .unwrap();
     let created = json(&run(
         dir,
         &[
             "manifest",
             "create-manifest",
-            "--cli-input-json",
-            "file://input.json",
+            "--manifest-file",
+            "task/outbound.json",
+            "--channel",
+            "slack",
             "--context",
             "file://context.txt",
+            "--body-file",
+            "body.md",
+            "--attachments",
+            "doc.pdf",
         ],
     ));
     assert_eq!(created["Channel"], "slack");
@@ -234,49 +221,21 @@ fn cli_input_json_and_file_values_fill_parameters() {
 }
 
 #[test]
-fn skeletons_use_pascal_case_keys() {
-    let directory = tempfile::tempdir().unwrap();
-    let input = json(&run(
-        directory.path(),
-        &["manifest", "seal-manifest", "--generate-cli-skeleton"],
-    ));
-    let keys: Vec<&String> = input.as_object().unwrap().keys().collect();
-    assert_eq!(
-        keys,
-        ["ManifestFile", "ApprovedBy", "ApprovalNote", "ApprovedAt"]
-    );
-    assert_eq!(input["ApprovedBy"], "user");
-    let output = json(&run(
-        directory.path(),
-        &[
-            "manifest",
-            "review-manifest",
-            "--generate-cli-skeleton",
-            "output",
-        ],
-    ));
-    assert!(output["Body"].is_string());
-    assert!(output["Attachments"][0]["Sha256"].is_string());
-}
-
-#[test]
-fn query_and_text_output() {
+fn text_output() {
     let directory = fixture();
     let dir = directory.path();
     json(&run(dir, CREATE));
     let output = run(
         dir,
         &with(
-            &[
-                "manifest",
-                "check-manifest",
-                "--query",
-                "Attachments[0].Path",
-                "--output",
-                "text",
-            ],
+            &["manifest", "check-manifest", "--output", "text"],
             MANIFEST,
         ),
     );
-    assert_eq!(String::from_utf8(output.stdout).unwrap(), "doc.pdf\n");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.starts_with("task/outbound.json\temail\t"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("\nATTACHMENTS\tdoc.pdf\t16\t"), "{stdout}");
 }

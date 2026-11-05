@@ -48,8 +48,7 @@ AWS CLI と同じ文法 `outbound-manifest [global options] <command> <subcomman
 
 - `--body-file` と `--attachments` のパスは manifest のディレクトリからの相対で解決する。
 - 値の先頭が `file://` ならファイルの中身を値として読む (例: `--context file://context.txt`)。パスを取るパラメータにはパスをそのまま渡す。
-- 各 subcommand は `--cli-input-json` (キーはパラメータ名の PascalCase、例: `{"ManifestFile": "...", "To": ["a@example.com"]}`) で全パラメータを受け、コマンドラインの値が優先する。`--generate-cli-skeleton [input|output]` で入力と出力の雛形を出す。
-- グローバルオプションは `--output json|text|table` (既定 `json`)、`--query <JMESPath>`、`--debug`、`--version`。出力のキーは PascalCase。
+- グローバルオプションは `--output json|text|table` (既定 `json`)、`--debug`、`--version`。出力のキーは PascalCase。
 - `outbound-manifest help`、`outbound-manifest manifest help`、`outbound-manifest manifest <subcommand> help` で各階層のヘルプを出す。
 - 終了コードは 0 が成功、252 が文法・パラメータの誤り、254 が manifest 側の誤り (検査の失敗、承認後の変更、manifest・本文・添付の読み込み失敗)、255 がそれ以外の失敗。
 
