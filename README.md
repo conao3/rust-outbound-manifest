@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="Cargo.toml"><img src="https://img.shields.io/badge/version-0.2.0-blue" alt="Version 0.2.0"></a>
-  <a href="Cargo.toml"><img src="https://img.shields.io/badge/license-MIT-green" alt="License: MIT"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/conao3/rust-outbound-manifest" alt="License: Apache-2.0"></a>
   <a href="Cargo.toml"><img src="https://img.shields.io/badge/Rust-2021_edition-orange?logo=rust" alt="Rust 2021 edition"></a>
   <a href="flake.nix"><img src="https://img.shields.io/badge/Nix-flake-5277C3?logo=nixos&logoColor=white" alt="Nix flake"></a>
   <a href="https://github.com/conao3/rust-outbound-manifest/stargazers"><img src="https://img.shields.io/github/stars/conao3/rust-outbound-manifest?style=flat" alt="GitHub stars"></a>
@@ -128,3 +128,7 @@ nix develop -c cargo test
 ```
 
 `tests/cli.rs` がバイナリを end-to-end で動かす。
+
+## License
+
+Apache-2.0。全文は [LICENSE](LICENSE)。

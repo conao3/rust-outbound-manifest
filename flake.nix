@@ -28,7 +28,7 @@
             meta = {
               description = "Review, seal, and verify external communications";
               homepage = "https://github.com/conao3/rust-outbound-manifest";
-              license = pkgs.lib.licenses.mit;
+              license = pkgs.lib.licenses.asl20;
               mainProgram = "outbound-manifest";
               platforms = pkgs.lib.platforms.unix;
             };
