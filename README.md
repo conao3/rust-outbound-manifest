@@ -13,10 +13,10 @@
 </p>
 
 <p align="center">
-  <a href="#install">Install</a> ·
-  <a href="#workflow">Workflow</a> ·
-  <a href="#checks">Checks</a> ·
-  <a href="#commands">Commands</a> ·
+  <a href="#install">Install</a> |
+  <a href="#workflow">Workflow</a> |
+  <a href="#checks">Checks</a> |
+  <a href="#commands">Commands</a> |
   <a href="#development">Development</a>
 </p>
 
